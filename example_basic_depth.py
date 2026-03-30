@@ -87,11 +87,11 @@ def create_basic_pipeline():
     stereo = pipeline.create(dai.node.StereoDepth)
     
     # Step 6: Configure stereo depth settings
-    # - HIGH_ACCURACY preset: Optimizes for accuracy over speed
+    # - ACCURACY preset: Optimizes for accuracy over speed
     # - Left-right check: Validates depth by checking consistency between cameras
     # - Extended disparity: Disabled (not needed for most use cases)
     # - Subpixel: Disabled (faster processing, slightly less accurate)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
     stereo.setLeftRightCheck(True)
     stereo.setExtendedDisparity(False)
     stereo.setSubpixel(False)

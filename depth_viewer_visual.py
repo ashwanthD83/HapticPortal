@@ -76,9 +76,13 @@ def colorize_depth(depth_frame, max_depth=5000):
     """
     depth_data = depth_frame.getFrame()
     
-    # Clip and normalize
-    depth_clipped = np.clip(depth_data, 0, max_depth)
-    depth_normalized = (depth_clipped / max_depth * 255).astype(np.uint8)
+    # Ensure we're working with a numpy array
+    if not isinstance(depth_data, np.ndarray):
+        depth_data = np.array(depth_data)
+    
+    # Clip and normalize (explicit dtype to avoid numpy version issues)
+    depth_clipped = np.clip(depth_data, 0, max_depth).astype(np.float32)
+    depth_normalized = (depth_clipped / float(max_depth) * 255.0).astype(np.uint8)
     
     # Apply colormap (TURBO: blue=far, red=near)
     depth_colorized = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_TURBO)
@@ -123,7 +127,8 @@ def draw_5x5_overlay(image, depth_5x5, position="top-right"):
             x = start_x + j * cell_size
             y = start_y + i * cell_size
             
-            value = depth_5x5[i, j]
+            # Get value with explicit int conversion
+            value = int(depth_5x5[i, j])
             
             # Color based on value (closer = warmer)
             if value > 200:

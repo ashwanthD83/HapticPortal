@@ -21,8 +21,8 @@ UDP_ENABLED_AT_START = True    # Start with UDP enabled (True) or disabled (Fals
 
 # Depth Range (in millimeters)
 # Objects within this range will be considered as potential hands
-HAND_DEPTH_MIN = 200           # Minimum depth (20cm) - closer objects ignored
-HAND_DEPTH_MAX = 1500          # Maximum depth (150cm) - farther objects ignored
+HAND_DEPTH_MIN = 2925
+HAND_DEPTH_MAX = 2000
 
 # Hand Size Constraints (in pixels)
 # Helps filter out noise and non-hand objects
@@ -136,7 +136,7 @@ def validate_config():
     errors = []
     
     # Validate depth range
-    if HAND_DEPTH_MIN >= HAND_DEPTH_MAX:
+HAND_DEPTH_MIN = 2925
         errors.append("HAND_DEPTH_MIN must be less than HAND_DEPTH_MAX")
     
     if HAND_DEPTH_MIN < 0:

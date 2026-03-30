@@ -57,32 +57,34 @@ def downscale_depth(depth_normalized, target_size):
     return cv2.resize(depth_normalized, target_size, interpolation=cv2.INTER_AREA)
 
 
-def process_depth_frame(depth_frame):
+def process_depth_frame(depth_frame, max_mm=5000, target_size=(5, 5)):
     """
     Process a depth frame through the complete pipeline.
     
     Orchestrates the full processing pipeline:
     1. Extract depth data from frame
-    2. Clip to 0-5000mm range
+    2. Clip to 0-max_mm range
     3. Normalize to 0-255 uint8
-    4. Downscale to 5x5
+    4. Downscale to target_size
     
     Args:
         depth_frame: DepthAI depth frame object with getFrame() method
-    
+        max_mm: clipping/normalization max depth in millimeters
+        target_size: tuple (width, height) output size
+
     Returns:
-        numpy array of shape (5, 5) with normalized depth values (uint8)
+        numpy array of shape target_size with normalized depth values (uint8)
     """
     # Extract depth data as numpy array
     depth_data = depth_frame.getFrame()
     
-    # Clip to 0-5000mm range
-    depth_clipped = clip_depth(depth_data, 5000)
+    # Clip to configured depth range
+    depth_clipped = clip_depth(depth_data, max_mm)
     
     # Normalize to 0-255 uint8
-    depth_normalized = normalize_depth(depth_clipped, 5000)
+    depth_normalized = normalize_depth(depth_clipped, max_mm)
     
-    # Downscale to 5x5
-    depth_5x5 = downscale_depth(depth_normalized, (5, 5))
+    # Downscale to target grid
+    depth_5x5 = downscale_depth(depth_normalized, target_size)
     
     return depth_5x5

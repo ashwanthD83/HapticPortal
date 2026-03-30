@@ -45,9 +45,9 @@ def create_stereo_pipeline():
     mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
     mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     
-    # Create stereo depth node with HIGH_ACCURACY preset (Requirement 5.2)
+    # Create stereo depth node with ACCURACY preset (Requirement 5.2)
     stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
     stereo.setLeftRightCheck(True)
     stereo.setExtendedDisparity(False)
     stereo.setSubpixel(False)

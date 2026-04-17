@@ -58,21 +58,28 @@ from src.optimized_renderer import OptimizedRenderer
 # Configuration
 # ============================================================================
 
-PICO_IP = "192.168.1.100"
-PICO_PORT = 5000
-UDP_ENABLED = True
 CONFIG_PATH = "config_hand_tracking.py"
 
+try:
+    import config_hand_tracking as app_config
+except Exception as e:
+    app_config = None
+    print(f"Warning: Failed to load {CONFIG_PATH}: {e}")
+
+PICO_IP = getattr(app_config, "PICO_IP", "192.168.1.100")
+PICO_PORT = getattr(app_config, "PICO_PORT", 5000)
+UDP_ENABLED = getattr(app_config, "UDP_ENABLED_AT_START", True)
+
 # Hand detection parameters
-HAND_DEPTH_MIN = 200
-HAND_DEPTH_MAX = 800  # Tighter range to exclude faces
-MIN_HAND_AREA = 3000
-MAX_HAND_AREA = 60000
+HAND_DEPTH_MIN = getattr(app_config, "HAND_DEPTH_MIN", 200)
+HAND_DEPTH_MAX = getattr(app_config, "HAND_DEPTH_MAX", 800)  # Tighter range to exclude faces
+MIN_HAND_AREA = getattr(app_config, "MIN_HAND_AREA", 3000)
+MAX_HAND_AREA = getattr(app_config, "MAX_HAND_AREA", 60000)
 MIN_ASPECT_RATIO = 0.4
 MAX_ASPECT_RATIO = 2.5
 HAND_Y_THRESHOLD = 0.3
 
-SMOOTHING_WINDOW = 7
+SMOOTHING_WINDOW = getattr(app_config, "SMOOTHING_WINDOW", 7)
 TEMPORAL_FILTER_FRAMES = 4
 
 
@@ -384,10 +391,14 @@ class UDPSender:
             return False
         
         try:
+            matrix = np.asarray(depth_5x5, dtype=np.uint8)
+            if matrix.shape != (5, 5):
+                raise ValueError(f"Expected 5x5 depth matrix, got {matrix.shape}")
+
             header = b"DPTH"
             packet_id = self.packet_count
             timestamp = time.time()
-            data = depth_5x5.flatten().tobytes()
+            data = matrix.flatten().tobytes()
             packet = header + struct.pack("<If", packet_id, timestamp) + data
             self.socket.sendto(packet, (self.target_ip, self.target_port))
             self.packet_count += 1

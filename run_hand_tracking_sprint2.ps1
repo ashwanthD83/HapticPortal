@@ -1,21 +1,31 @@
-# Run Hand Tracking Sprint 2 with YOLO Detection
+# Run Hand Tracking Sprint 2 with MediaPipe detection
 # Enhanced performance monitoring and real-time calibration
 
-Write-Host "Activating virtual environment..." -ForegroundColor Cyan
-.\.venv\Scripts\Activate.ps1
+$venvPath = ""
+if (Test-Path ".\.venv311\Scripts\Activate.ps1") {
+    $venvPath = ".\.venv311\Scripts\Activate.ps1"
+} elseif (Test-Path ".\.venv\Scripts\Activate.ps1") {
+    $venvPath = ".\.venv\Scripts\Activate.ps1"
+} else {
+    throw "No virtual environment found. Expected .venv311 or .venv."
+}
+
+$pythonExe = Join-Path (Split-Path $venvPath) "python.exe"
+
+Write-Host "Using Python interpreter: $pythonExe" -ForegroundColor Cyan
 
 Write-Host ""
-Write-Host "Starting Hand Tracking Sprint 2 with YOLO Detection..." -ForegroundColor Green
+Write-Host "Starting Hand Tracking Sprint 2 with MediaPipe Detection..." -ForegroundColor Green
 Write-Host ""
 Write-Host "Sprint 2 Features:" -ForegroundColor Yellow
-Write-Host "  - YOLO-based hand detection (YOLOv4-Tiny: 89% accuracy)"
+Write-Host "  - MediaPipe hand detection with 21 landmarks"
 Write-Host "  - Performance profiling with FPS monitoring"
 Write-Host "  - Real-time calibration controls"
 Write-Host "  - Configuration persistence"
 Write-Host "  - Optimized rendering with caching"
 Write-Host ""
 Write-Host "4 Windows will open:" -ForegroundColor Yellow
-Write-Host "  1. RGB Camera - Live feed with YOLO hand detection box"
+Write-Host "  1. RGB Camera - Live feed with MediaPipe hand detection box"
 Write-Host "  2. Depth Map - Colorized depth visualization"
 Write-Host "  3. Hand Region - Zoomed view of detected hand"
 Write-Host "  4. 5x5 Matrix - Large depth matrix with performance stats"
@@ -32,7 +42,4 @@ Write-Host "  ] - Increase min depth"
 Write-Host "  p - Save calibration to config"
 Write-Host ""
 
-python hand_tracking_sprint2.py
-
-Write-Host "`nDeactivating virtual environment..." -ForegroundColor Cyan
-deactivate
+& $pythonExe hand_tracking_sprint2.py

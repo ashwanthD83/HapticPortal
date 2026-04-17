@@ -15,6 +15,11 @@ import pytest
 import depthai as dai
 from src.pipeline_builder import create_stereo_pipeline
 
+pytestmark = pytest.mark.skipif(
+    len(dai.Device.getAllAvailableDevices()) == 0,
+    reason="No OAK-D device connected; DepthAI 3.x pipeline creation requires hardware in this environment.",
+)
+
 
 class TestPipelineConstruction:
     """Test that the pipeline is constructed with all required nodes."""

@@ -1,130 +1,81 @@
 """
-Hand Tracking Configuration File
+Hand tracking configuration shared by the PC app.
 
-Edit these values to customize the hand tracking behavior.
-Then import this file in hand_tracking_udp.py
+The Sprint 2 app reads these values at startup. Depth calibration can also be
+saved back into this file from the running app.
 """
 
 # ============================================================================
 # Network Configuration
 # ============================================================================
 
-# Raspberry Pi Pico Network Settings
-PICO_IP = "192.168.1.100"      # Change to your Pico's IP address
-PICO_PORT = 5000               # Change to your Pico's listening port
-UDP_ENABLED_AT_START = True    # Start with UDP enabled (True) or disabled (False)
+PICO_IP = "192.168.1.100"
+PICO_PORT = 5000
+UDP_ENABLED_AT_START = True
 
 
 # ============================================================================
 # Hand Detection Configuration
 # ============================================================================
 
-# Depth Range (in millimeters)
-# Objects within this range will be considered as potential hands
-HAND_DEPTH_MIN = 2925
-HAND_DEPTH_MAX = 2000
+HAND_DEPTH_MIN = 1029
+HAND_DEPTH_MAX = 1529
 
-# Hand Size Constraints (in pixels)
-# Helps filter out noise and non-hand objects
-MIN_HAND_AREA = 1000           # Minimum contour area to be considered a hand
-MAX_HAND_AREA = 100000         # Maximum contour area (prevents detecting walls, etc.)
+MIN_HAND_AREA = 1000
+MAX_HAND_AREA = 100000
 
 
 # ============================================================================
 # Smoothing Configuration
 # ============================================================================
 
-# Rolling Average Window Size
-# Higher values = smoother but slower response
-# Lower values = faster response but more jitter
-SMOOTHING_WINDOW = 5           # Number of frames to average (recommended: 3-10)
-
-
-# ============================================================================
-# Presets (Uncomment one to use)
-# ============================================================================
-
-# # PRESET 1: Close Range Tracking (0-50cm)
-# # Use for: Close-up hand gestures, finger tracking
-# HAND_DEPTH_MIN = 50
-# HAND_DEPTH_MAX = 500
-# SMOOTHING_WINDOW = 3  # Faster response for quick movements
-
-# # PRESET 2: Medium Range Tracking (20-150cm) - DEFAULT
-# # Use for: General hand tracking, most applications
-# HAND_DEPTH_MIN = 200
-# HAND_DEPTH_MAX = 1500
-# SMOOTHING_WINDOW = 5  # Balanced smoothing
-
-# # PRESET 3: Far Range Tracking (50-300cm)
-# # Use for: Full body tracking, large movements
-# HAND_DEPTH_MIN = 500
-# HAND_DEPTH_MAX = 3000
-# SMOOTHING_WINDOW = 7  # More smoothing for stability
-
-# # PRESET 4: Ultra Smooth (for stable output)
-# # Use for: When stability is more important than responsiveness
-# SMOOTHING_WINDOW = 10
-
-# # PRESET 5: Ultra Responsive (for quick movements)
-# # Use for: Fast hand movements, gaming
-# SMOOTHING_WINDOW = 2
+SMOOTHING_WINDOW = 5
 
 
 # ============================================================================
 # Advanced Configuration
 # ============================================================================
 
-# Morphological Operations (for noise reduction)
-MORPH_KERNEL_SIZE = 5          # Size of morphological kernel (3, 5, or 7)
+MORPH_KERNEL_SIZE = 5
+BBOX_PADDING = 20
 
-# Bounding Box Padding
-BBOX_PADDING = 20              # Pixels to add around detected hand
-
-# Display Configuration
-SHOW_RAW_VALUES = True         # Show raw (unsmoothed) values
-SHOW_SMOOTHED_VALUES = True    # Show smoothed values
-CELL_SIZE = 50                 # Size of each cell in 5x5 grid display
+SHOW_RAW_VALUES = True
+SHOW_SMOOTHED_VALUES = True
+CELL_SIZE = 50
 
 
 # ============================================================================
 # Network Advanced Configuration
 # ============================================================================
 
-# UDP Socket Configuration
-UDP_BUFFER_SIZE = 1024         # UDP receive buffer size
-UDP_TIMEOUT = None             # Socket timeout (None = blocking)
+UDP_BUFFER_SIZE = 1024
+UDP_TIMEOUT = None
 
-# Packet Configuration
-INCLUDE_TIMESTAMP = True       # Include timestamp in packets
-INCLUDE_PACKET_ID = True       # Include packet ID in packets
+INCLUDE_TIMESTAMP = True
+INCLUDE_PACKET_ID = True
 
 
 # ============================================================================
 # Performance Configuration
 # ============================================================================
 
-# Frame Rate Limiting
-TARGET_FPS = 30                # Target frames per second (0 = unlimited)
+TARGET_FPS = 30
 FRAME_DELAY = 1.0 / TARGET_FPS if TARGET_FPS > 0 else 0
 
-# Queue Configuration
-QUEUE_MAX_SIZE = 4             # Maximum frames in queue
-QUEUE_BLOCKING = False         # Block when queue is full
+QUEUE_MAX_SIZE = 4
+QUEUE_BLOCKING = False
 
 
 # ============================================================================
 # Debug Configuration
 # ============================================================================
 
-# Debug Output
-DEBUG_MODE = False             # Enable debug output
-VERBOSE_LOGGING = False        # Enable verbose logging
-SHOW_FPS = True                # Show FPS counter
+DEBUG_MODE = False
+VERBOSE_LOGGING = False
+SHOW_FPS = True
 
-# Visualization
-SHOW_HAND_MASK = False         # Show binary hand mask (debug window)
-SHOW_CONTOURS = False          # Draw all contours (debug)
+SHOW_HAND_MASK = False
+SHOW_CONTOURS = False
 
 
 # ============================================================================
@@ -132,34 +83,30 @@ SHOW_CONTOURS = False          # Draw all contours (debug)
 # ============================================================================
 
 def validate_config():
-    """Validate configuration values."""
+    """Validate configuration values and return a list of issues."""
     errors = []
-    
-    # Validate depth range
-HAND_DEPTH_MIN = 2925
+
+    if HAND_DEPTH_MIN >= HAND_DEPTH_MAX:
         errors.append("HAND_DEPTH_MIN must be less than HAND_DEPTH_MAX")
-    
+
     if HAND_DEPTH_MIN < 0:
         errors.append("HAND_DEPTH_MIN must be positive")
-    
-    # Validate area constraints
+
     if MIN_HAND_AREA >= MAX_HAND_AREA:
         errors.append("MIN_HAND_AREA must be less than MAX_HAND_AREA")
-    
-    # Validate smoothing window
+
     if SMOOTHING_WINDOW < 1:
         errors.append("SMOOTHING_WINDOW must be at least 1")
-    
+
     if SMOOTHING_WINDOW > 20:
-        errors.append("Warning: SMOOTHING_WINDOW > 20 may cause excessive lag")
-    
-    # Validate network config
+        errors.append("SMOOTHING_WINDOW > 20 may cause excessive lag")
+
     if not PICO_IP:
         errors.append("PICO_IP must be set")
-    
+
     if PICO_PORT < 1 or PICO_PORT > 65535:
         errors.append("PICO_PORT must be between 1 and 65535")
-    
+
     return errors
 
 
@@ -168,66 +115,54 @@ HAND_DEPTH_MIN = 2925
 # ============================================================================
 
 def print_config():
-    """Print current configuration."""
+    """Print the current configuration."""
     print("=" * 70)
     print("Hand Tracking Configuration")
     print("=" * 70)
-    print(f"\nNetwork:")
+    print("\nNetwork:")
     print(f"  Pico IP: {PICO_IP}")
     print(f"  Pico Port: {PICO_PORT}")
     print(f"  UDP Enabled: {UDP_ENABLED_AT_START}")
-    print(f"\nHand Detection:")
+    print("\nHand Detection:")
     print(f"  Depth Range: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
     print(f"  Area Range: {MIN_HAND_AREA}-{MAX_HAND_AREA} pixels")
-    print(f"\nSmoothing:")
+    print("\nSmoothing:")
     print(f"  Window Size: {SMOOTHING_WINDOW} frames")
-    print(f"\nPerformance:")
+    print("\nPerformance:")
     print(f"  Target FPS: {TARGET_FPS}")
     print("=" * 70)
 
 
 def get_config_dict():
-    """Get configuration as dictionary."""
+    """Return the config as a dictionary."""
     return {
-        'network': {
-            'pico_ip': PICO_IP,
-            'pico_port': PICO_PORT,
-            'udp_enabled': UDP_ENABLED_AT_START,
+        "network": {
+            "pico_ip": PICO_IP,
+            "pico_port": PICO_PORT,
+            "udp_enabled": UDP_ENABLED_AT_START,
         },
-        'hand_detection': {
-            'depth_min': HAND_DEPTH_MIN,
-            'depth_max': HAND_DEPTH_MAX,
-            'area_min': MIN_HAND_AREA,
-            'area_max': MAX_HAND_AREA,
+        "hand_detection": {
+            "depth_min": HAND_DEPTH_MIN,
+            "depth_max": HAND_DEPTH_MAX,
+            "area_min": MIN_HAND_AREA,
+            "area_max": MAX_HAND_AREA,
         },
-        'smoothing': {
-            'window_size': SMOOTHING_WINDOW,
+        "smoothing": {
+            "window_size": SMOOTHING_WINDOW,
         },
-        'performance': {
-            'target_fps': TARGET_FPS,
-        }
+        "performance": {
+            "target_fps": TARGET_FPS,
+        },
     }
 
 
-# ============================================================================
-# Auto-validation on import
-# ============================================================================
+errors = validate_config()
 
 if __name__ == "__main__":
-    # If run directly, print config and validate
     print_config()
-    
-    errors = validate_config()
     if errors:
-        print("\n⚠️  Configuration Errors:")
+        print("\nConfiguration issues:")
         for error in errors:
             print(f"  - {error}")
     else:
-        print("\n✅ Configuration is valid!")
-else:
-    # If imported, validate silently
-    errors = validate_config()
-    if errors:
-        print("⚠️  Configuration warnings:")
-        for error in errors:
-            print(f"  - {error}")
+        print("\nConfiguration is valid.")

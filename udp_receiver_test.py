@@ -38,7 +38,7 @@ def main():
             data, addr = sock.recvfrom(1024)
             
             # Parse packet
-            if len(data) < 41:
+            if len(data) < 37:
                 print(f"Invalid packet size: {len(data)} bytes")
                 continue
             

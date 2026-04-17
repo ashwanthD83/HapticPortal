@@ -25,6 +25,8 @@ MANIFEST
 
 # Virtual Environment
 oak_env/
+.venv/
+.venv311/
 venv/
 ENV/
 env/
@@ -53,6 +55,17 @@ depthai/
 # Calibration outputs
 *.json
 calibration_data/
+verification_output/
+verification_output_h5/
+verification_output_h5_5000/
+verification_output_h5_10000_fixed/
+baseline_metrics.json
+
+# Local data and backups
+Test_Images/
+config_hand_tracking.py.backup
+.micropico
+pico_w.zip
 
 # AI Agent/Kiro
 .kiro/

@@ -105,3 +105,12 @@ The script renders four windows:
 - Sprint2 is the current final script.
 - Older hand-tracking iterations and YOLO model assets were removed to reduce project clutter.
 - The calibration guide in `docs/CALIBRATION_GUIDE.md` remains as the dedicated depth-calibration reference.
+
+## Data Smoothing (Task 2.2)
+
+The displayed and transmitted 5x5 matrix uses a rolling average of the latest
+`SMOOTHING_WINDOW` frames (default: 5 in `config_hand_tracking.py`). Each cell is
+averaged independently and rounded to a 0-255 integer. Startup uses only the
+frames available. History resets when hand tracking is lost or regained, or
+the depth calibration changes. Increase the window for steadier values;
+decrease it for faster response. The filter lives in `src/rolling_average.py`.

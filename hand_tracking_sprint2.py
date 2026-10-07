@@ -48,6 +48,7 @@ except ImportError as e:
     sys.exit(1)
 
 from src.depth_processor import process_depth_frame
+from src.rolling_average import RollingAverageFilter
 from src.performance_profiler import PerformanceProfiler
 from src.calibration_manager import CalibrationManager
 from src.config_persistence import ConfigPersistence
@@ -293,32 +294,6 @@ class MediaPipeHandDetector:
         except Exception:
             pass
 
-
-
-# ============================================================================
-# Rolling Average Filter
-# ============================================================================
-
-class RollingAverageFilter:
-    """Median-based smoothing filter."""
-    
-    def __init__(self, window_size=7):
-        self.window_size = window_size
-        self.history = deque(maxlen=window_size)
-    
-    def update(self, new_array):
-        self.history.append(new_array.copy().astype(np.float32))
-        
-        if len(self.history) < 2:
-            return new_array
-        
-        history_stack = np.stack(list(self.history), axis=0)
-        smoothed = np.median(history_stack, axis=0).astype(np.uint8)
-        
-        return smoothed
-    
-    def reset(self):
-        self.history.clear()
 
 
 # ============================================================================
@@ -743,6 +718,7 @@ def main():
         # Initialize components
         udp_sender = UDPSender(PICO_IP, PICO_PORT)
         smoother = RollingAverageFilter(window_size=SMOOTHING_WINDOW)
+        smoothing_context = None
         detector = MediaPipeHandDetector(
             confidence_threshold=0.5
         )
@@ -816,7 +792,13 @@ def main():
                 depth_5x5_raw = process_depth_frame(depth_frame_data)
             profiler.end_stage("depth_processing")
             
-            # Apply smoothing
+            # Clear samples when tracking or the depth scale changes.
+            current_context = (hand_detected, HAND_DEPTH_MIN, HAND_DEPTH_MAX)
+            if current_context != smoothing_context:
+                smoother.reset()
+                smoothing_context = current_context
+
+            # Apply rolling average before display and UDP transmission.
             depth_5x5_smoothed = smoother.update(depth_5x5_raw)
             
             # Send via UDP

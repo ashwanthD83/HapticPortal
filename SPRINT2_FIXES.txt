@@ -1,0 +1,90 @@
+SPRINT 2 - REMAINING FIXES FOR TASKS 2.1 AND 2.2
+=================================================
+
+Based on a review of main at commit 48a66c0 (Oct 22, 2026).
+The code has been read, and the rolling-average unit tests pass, but
+none of this has been tested on the camera yet.
+Line numbers refer to hand_tracking_sprint2.py at that commit.
+
+
+TASK 2.1 - Crop depth map strictly to the hand
+----------------------------------------------
+Current state: MediaPipe finds the hand in the RGB image, and
+crop_depth_to_hand() crops the depth map to that bounding box.
+Pixels outside the box are ignored, but the crop is not strict yet.
+
+[ ] 1. Exclude background pixels inside the hand box
+       Where: crop_depth_to_hand(), line ~356
+       Problem: np.clip(hand_region, HAND_DEPTH_MIN, HAND_DEPTH_MAX)
+       turns background pixels (gaps between fingers, wall behind the
+       hand) into HAND_DEPTH_MAX instead of dropping them. They then
+       get averaged into the 5x5 cells, pulling them toward "far".
+       Fix: Treat pixels outside [HAND_DEPTH_MIN, HAND_DEPTH_MAX] as
+       invalid (e.g. set them to NaN), then compute each of the 25
+       cells as the mean of only its valid pixels instead of using
+       cv2.resize(INTER_AREA). Decide what an empty cell should send
+       (0 = "no contact" is probably the right choice for haptics).
+
+[ ] 2. Use the hand mask that is already computed (or remove it)
+       Where: detect_hand(), lines ~274-299; main loop, line ~818
+       Problem: detect_hand() builds hand_mask (depth-range mask inside
+       the bbox), but the main loop never uses it.
+       Fix: Either pass hand_mask into crop_depth_to_hand() and use it
+       for fix #1, or delete it to avoid confusion.
+
+[ ] 3. Align the depth map to the RGB camera
+       Where: create_pipeline(), both StereoDepth setups
+       (lines ~679-685 and ~706-712)
+       Problem: The bbox comes from the RGB camera, but depth comes from
+       the stereo cameras, which have a different position and field
+       of view. Nothing aligns them, so the bbox can land slightly off
+       the hand in the depth map.
+       Fix: Add stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A) in both
+       pipeline branches, and make sure RGB and depth output the same
+       resolution (640x400). Verify on the camera by checking that the
+       "3. Hand Region" window shows the hand centred, not shifted.
+
+[ ] 4. Do not compute a full-scene matrix when no hand is detected
+       Where: main loop, lines ~834-837
+       Problem: When no hand is detected, process_depth_frame() runs on
+       the whole frame (background included). It is not sent over
+       UDP, but it is shown in the matrix window and fed into the
+       smoother (see Task 2.2 fix #1).
+       Fix: When no hand is detected, skip depth processing (or output
+       all zeros) instead of processing the full frame.
+
+
+TASK 2.2 - Rolling average filter
+---------------------------------
+Current state: Done and working. src/rolling_average.py averages each
+cell over the last SMOOTHING_WINDOW frames (5, set in
+config_hand_tracking.py). It is applied at line ~841, and the smoothed
+matrix is what gets sent over UDP. Unit tests in
+tests/unit/test_rolling_average.py pass (8/8).
+
+[ ] 1. Reset the filter when the hand is lost
+       Where: main loop, around line ~841
+       Problem: Frames with no hand are still pushed into the filter, so
+       for the first few frames after the hand reappears, the output
+       is blended with background values.
+       Fix: Call smoother.reset() when hand_detected is False, and only
+       call smoother.update() when a hand is detected.
+
+[ ] 2. Reset the filter when the depth range changes
+       Where: main loop key handlers ('c', 'r', '+', '-', '[', ']')
+       Problem: After recalibration, old frames normalized with the old
+       range are averaged with new ones for a few frames.
+       Fix: Call smoother.reset() after any change to HAND_DEPTH_MIN or
+       HAND_DEPTH_MAX.
+
+[ ] 3. Tune the window size on the hardware
+       Where: config_hand_tracking.py, SMOOTHING_WINDOW
+       Note: The code fallback in hand_tracking_sprint2.py is 7, but the
+       config sets 5, so 5 is what runs. Try 3-8 on the camera: larger
+       values flicker less but lag more. Make the fallback match the
+       config once a value is chosen.
+
+[ ] 4. (Optional) Ignore outlier frames
+       If single-frame spikes still come through, consider a median of
+       the last N frames instead of the mean, or an exponential moving
+       average. Only needed if the rolling mean is not smooth enough.

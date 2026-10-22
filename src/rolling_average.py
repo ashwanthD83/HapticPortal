@@ -1,6 +1,5 @@
 """Temporal smoothing for the portal's normalized depth matrices."""
 
-# pyright: reportMissingImports=false
 from collections import deque
 
 import numpy as np

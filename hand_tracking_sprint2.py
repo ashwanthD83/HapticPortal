@@ -48,11 +48,11 @@ except ImportError as e:
     sys.exit(1)
 
 from src.depth_processor import process_depth_frame
-from src.rolling_average import RollingAverageFilter
 from src.performance_profiler import PerformanceProfiler
 from src.calibration_manager import CalibrationManager
 from src.config_persistence import ConfigPersistence
 from src.optimized_renderer import OptimizedRenderer
+from src.rolling_average import RollingAverageFilter
 
 
 # ============================================================================
@@ -81,6 +81,7 @@ MAX_ASPECT_RATIO = 2.5
 HAND_Y_THRESHOLD = 0.3
 
 SMOOTHING_WINDOW = getattr(app_config, "SMOOTHING_WINDOW", 7)
+TARGET_FPS = getattr(app_config, "TARGET_FPS", 30)
 TEMPORAL_FILTER_FRAMES = 4
 
 
@@ -632,43 +633,58 @@ def create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, udp_sender,
 def create_pipeline():
     """Create DepthAI pipeline."""
     pipeline = dai.Pipeline()
-    
-    # RGB camera
-    cam_rgb = pipeline.create(dai.node.ColorCamera)
-    cam_rgb.setPreviewSize(640, 400)
-    cam_rgb.setInterleaved(False)
-    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
-    
-    # Mono cameras
-    mono_left = pipeline.create(dai.node.MonoCamera)
-    mono_right = pipeline.create(dai.node.MonoCamera)
-    
-    mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-    
-    mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-    
-    # Stereo depth
+
+    if hasattr(dai.node, "XLinkOut"):
+        cam_rgb = pipeline.create(dai.node.ColorCamera)
+        cam_rgb.setPreviewSize(640, 400)
+        cam_rgb.setInterleaved(False)
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
+
+        mono_left = pipeline.create(dai.node.MonoCamera)
+        mono_right = pipeline.create(dai.node.MonoCamera)
+        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+
+        stereo = pipeline.create(dai.node.StereoDepth)
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
+        stereo.setLeftRightCheck(True)
+        stereo.setExtendedDisparity(False)
+        stereo.setSubpixel(False)
+        mono_left.out.link(stereo.left)
+        mono_right.out.link(stereo.right)
+
+        xout_rgb = pipeline.create(dai.node.XLinkOut)
+        xout_rgb.setStreamName("rgb")
+        cam_rgb.preview.link(xout_rgb.input)
+        xout_depth = pipeline.create(dai.node.XLinkOut)
+        xout_depth.setStreamName("depth")
+        stereo.depth.link(xout_depth.input)
+        return pipeline, None, None
+
+    cam_rgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+    rgb_output = cam_rgb.requestOutput((640, 400), fps=TARGET_FPS)
+    mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+    mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+    left_output = mono_left.requestOutput(
+        (640, 400), type=dai.ImgFrame.Type.GRAY8, fps=TARGET_FPS
+    )
+    right_output = mono_right.requestOutput(
+        (640, 400), type=dai.ImgFrame.Type.GRAY8, fps=TARGET_FPS
+    )
+
     stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
     stereo.setLeftRightCheck(True)
     stereo.setExtendedDisparity(False)
     stereo.setSubpixel(False)
-    
-    mono_left.out.link(stereo.left)
-    mono_right.out.link(stereo.right)
-    
-    # Outputs
-    xout_rgb = pipeline.create(dai.node.XLinkOut)
-    xout_rgb.setStreamName("rgb")
-    cam_rgb.preview.link(xout_rgb.input)
-    
-    xout_depth = pipeline.create(dai.node.XLinkOut)
-    xout_depth.setStreamName("depth")
-    stereo.depth.link(xout_depth.input)
-    
-    return pipeline
+    left_output.link(stereo.left)
+    right_output.link(stereo.right)
+
+    rgb_queue = rgb_output.createOutputQueue(maxSize=4, blocking=False)
+    depth_queue = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
+    return pipeline, rgb_queue, depth_queue
 
 
 
@@ -710,22 +726,22 @@ def main():
             print(f"[OK] Loaded saved calibration: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
         
         # Create pipeline and device
-        pipeline = create_pipeline()
-        device = dai.Device(pipeline)
+        pipeline, rgb_queue, depth_queue = create_pipeline()
+        if hasattr(dai.Device, "getOutputQueue"):
+            device = dai.Device(pipeline)
+            rgb_queue = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
+            depth_queue = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+        else:
+            pipeline.start()
         
         print("[OK] Device initialized!")
         
         # Initialize components
         udp_sender = UDPSender(PICO_IP, PICO_PORT)
         smoother = RollingAverageFilter(window_size=SMOOTHING_WINDOW)
-        smoothing_context = None
         detector = MediaPipeHandDetector(
             confidence_threshold=0.5
         )
-        
-        # Get queues
-        rgb_queue = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
-        depth_queue = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
         
         # Create windows
         cv2.namedWindow("1. RGB Camera", cv2.WINDOW_NORMAL)
@@ -792,13 +808,7 @@ def main():
                 depth_5x5_raw = process_depth_frame(depth_frame_data)
             profiler.end_stage("depth_processing")
             
-            # Clear samples when tracking or the depth scale changes.
-            current_context = (hand_detected, HAND_DEPTH_MIN, HAND_DEPTH_MAX)
-            if current_context != smoothing_context:
-                smoother.reset()
-                smoothing_context = current_context
-
-            # Apply rolling average before display and UDP transmission.
+            # Apply smoothing
             depth_5x5_smoothed = smoother.update(depth_5x5_raw)
             
             # Send via UDP
@@ -885,6 +895,11 @@ def main():
             detector.close()
         if 'udp_sender' in locals():
             udp_sender.close()
+        if 'pipeline' in locals() and not hasattr(dai.Device, "getOutputQueue"):
+            if pipeline.isRunning():
+                pipeline.stop()
+        if 'device' in locals():
+            device.close()
         cv2.destroyAllWindows()
         
         # Print performance summary
@@ -913,4 +928,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

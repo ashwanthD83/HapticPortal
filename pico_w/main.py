@@ -13,8 +13,9 @@ import struct
 import time
 
 
-WIFI_SSID = "Starforge Guest"
-WIFI_PASSWORD = "makerspace3111"
+# WIFI_SSID = "Starforge Guest"
+WIFI_SSID = "TamuFabLab_STUDENT"
+WIFI_PASSWORD = "TFL_Student609"
 
 UDP_PORT = 5000
 PACKET_HEADER = b"DPTH"

@@ -3,11 +3,29 @@ import struct
 import time
 import random
 
-PICO_IP = "192.168.1.100"
-PICO_PORT = 5000
+PICO_IP = "10.10.1.46"
+PICO_PORT = 1234
 
-def create_depth_packet(packet_id):
-    """Constructs a 37-byte packet matching the Pico's expected format."""
+def build_depth_packet(matrix, id, val):
+    matrix[id] = val
+    return matrix
+
+def create_depth_packet(packet_id, matrix):
+    header = b"DPTH"
+    timestamp = time.time() % 1000.0  
+    
+    # matrix value
+    matrix_bytes = bytes(matrix)
+
+    # <: little endian
+    # 4s: 4 bytes for header (DPTH)
+    # I: 4 bytes for unsigned int (packet_id) 
+    # f: 4 bytes for a float (timestamp) 
+    # 25s: 25 bytes for matrix data
+    packet = struct.pack("<4sIf25s", header, packet_id, timestamp, matrix_bytes)
+    return packet
+
+def create_rand_depth_packet(packet_id):
     header = b"DPTH"
     timestamp = time.time() % 1000.0  
     
@@ -33,7 +51,17 @@ def main():
     packet_id = 1
     try:
         while True:
-            packet = create_depth_packet(packet_id)
+            inp = input("Enter matrix as \"id, val\", enter \"q\" to quit: \n")
+            matrix = [0 for _ in range(25)]
+            while(inp != "q"):
+                result = inp.split(" ")
+                matrix = build_depth_packet(matrix, int(result[0]), int(result[1]))
+                inp = input("Enter matrix as \"id, val\", enter \"q\" to quit: \n")
+            
+            
+            packet = create_depth_packet(packet_id, matrix)
+
+            # packet = create_rand_depth_packet(packet_id)
             sock.sendto(packet, (PICO_IP, PICO_PORT))
             
             print(f"sent packet #{packet_id} ({len(packet)} bytes)")

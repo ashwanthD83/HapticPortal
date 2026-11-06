@@ -6,6 +6,12 @@ The code has been read, and the rolling-average unit tests pass, but
 none of this has been tested on the camera yet.
 Line numbers refer to hand_tracking_sprint2.py at that commit.
 
+UPDATE (Nov 5, 2026): items marked [x] are implemented (src/hand_matrix.py,
+tests/unit/test_hand_matrix.py) but still need checking on the camera. Also
+added: subpixel depth, stereo post-filters, RGB/depth timestamp sync, fixed-span
+normalization (no per-frame stretching), bbox smoothing. Matrix convention is
+now 0 = no hand, 1-255 = higher is closer.
+
 
 TASK 2.1 - Crop depth map strictly to the hand
 ----------------------------------------------
@@ -13,7 +19,7 @@ Current state: MediaPipe finds the hand in the RGB image, and
 crop_depth_to_hand() crops the depth map to that bounding box.
 Pixels outside the box are ignored, but the crop is not strict yet.
 
-[ ] 1. Exclude background pixels inside the hand box
+[x] 1. Exclude background pixels inside the hand box
        Where: crop_depth_to_hand(), line ~356
        Problem: np.clip(hand_region, HAND_DEPTH_MIN, HAND_DEPTH_MAX)
        turns background pixels (gaps between fingers, wall behind the
@@ -25,14 +31,14 @@ Pixels outside the box are ignored, but the crop is not strict yet.
        cv2.resize(INTER_AREA). Decide what an empty cell should send
        (0 = "no contact" is probably the right choice for haptics).
 
-[ ] 2. Use the hand mask that is already computed (or remove it)
+[x] 2. Use the hand mask that is already computed (or remove it)
        Where: detect_hand(), lines ~274-299; main loop, line ~818
        Problem: detect_hand() builds hand_mask (depth-range mask inside
        the bbox), but the main loop never uses it.
        Fix: Either pass hand_mask into crop_depth_to_hand() and use it
        for fix #1, or delete it to avoid confusion.
 
-[ ] 3. Align the depth map to the RGB camera
+[x] 3. Align the depth map to the RGB camera
        Where: create_pipeline(), both StereoDepth setups
        (lines ~679-685 and ~706-712)
        Problem: The bbox comes from the RGB camera, but depth comes from
@@ -44,7 +50,7 @@ Pixels outside the box are ignored, but the crop is not strict yet.
        resolution (640x400). Verify on the camera by checking that the
        "3. Hand Region" window shows the hand centred, not shifted.
 
-[ ] 4. Do not compute a full-scene matrix when no hand is detected
+[x] 4. Do not compute a full-scene matrix when no hand is detected
        Where: main loop, lines ~834-837
        Problem: When no hand is detected, process_depth_frame() runs on
        the whole frame (background included). It is not sent over
@@ -62,7 +68,7 @@ config_hand_tracking.py). It is applied at line ~841, and the smoothed
 matrix is what gets sent over UDP. Unit tests in
 tests/unit/test_rolling_average.py pass (8/8).
 
-[ ] 1. Reset the filter when the hand is lost
+[x] 1. Reset the filter when the hand is lost
        Where: main loop, around line ~841
        Problem: Frames with no hand are still pushed into the filter, so
        for the first few frames after the hand reappears, the output
@@ -70,7 +76,7 @@ tests/unit/test_rolling_average.py pass (8/8).
        Fix: Call smoother.reset() when hand_detected is False, and only
        call smoother.update() when a hand is detected.
 
-[ ] 2. Reset the filter when the depth range changes
+[x] 2. Reset the filter when the depth range changes
        Where: main loop key handlers ('c', 'r', '+', '-', '[', ']')
        Problem: After recalibration, old frames normalized with the old
        range are averaged with new ones for a few frames.

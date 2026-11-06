@@ -18,8 +18,8 @@ UDP_ENABLED_AT_START = True
 # Hand Detection Configuration
 # ============================================================================
 
-HAND_DEPTH_MIN = 1029
-HAND_DEPTH_MAX = 1529
+HAND_DEPTH_MIN = 250
+HAND_DEPTH_MAX = 900
 
 MIN_HAND_AREA = 1000
 MAX_HAND_AREA = 100000
@@ -30,6 +30,33 @@ MAX_HAND_AREA = 100000
 # ============================================================================
 
 SMOOTHING_WINDOW = 5
+
+# Box and hand-depth smoothing (1.0 = no smoothing, lower = steadier but laggier)
+BBOX_SMOOTHING_ALPHA = 0.5
+HAND_DEPTH_SMOOTHING_ALPHA = 0.3
+
+
+# ============================================================================
+# Stereo Depth Quality
+# ============================================================================
+
+# Subpixel disparity: much finer depth steps. Keep on.
+STEREO_SUBPIXEL = True
+# Lets the hand come closer than ~35 cm, at some FPS cost.
+STEREO_EXTENDED_DISPARITY = False
+
+
+# ============================================================================
+# 5x5 Matrix Construction
+# ============================================================================
+
+# Matrix values: 0 = no hand in cell, 1..255 = hand surface, higher = closer.
+# RELIEF_SPAN_MM of depth around the hand's own depth maps to 1..255.
+RELIEF_SPAN_MM = 150
+# Pixels farther than this from the hand's depth count as background.
+HAND_BAND_MM = 120
+# A cell needs at least this fraction of hand pixels, otherwise it is 0.
+MIN_CELL_COVERAGE = 0.15
 
 
 # ============================================================================

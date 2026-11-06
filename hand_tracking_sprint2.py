@@ -40,6 +40,7 @@ import socket
 import struct
 import time
 from collections import deque
+from datetime import timedelta
 
 try:
     import depthai as dai
@@ -47,12 +48,13 @@ except ImportError as e:
     print(f"Error: Failed to import depthai: {e}")
     sys.exit(1)
 
-from src.depth_processor import process_depth_frame
 from src.performance_profiler import PerformanceProfiler
 from src.calibration_manager import CalibrationManager
 from src.config_persistence import ConfigPersistence
 from src.optimized_renderer import OptimizedRenderer
 from src.rolling_average import RollingAverageFilter
+import src.hand_matrix as hand_matrix_lib
+from src.hand_matrix import estimate_hand_depth, ExponentialSmoother
 
 
 # ============================================================================
@@ -80,9 +82,24 @@ MIN_ASPECT_RATIO = 0.4
 MAX_ASPECT_RATIO = 2.5
 HAND_Y_THRESHOLD = 0.3
 
-SMOOTHING_WINDOW = getattr(app_config, "SMOOTHING_WINDOW", 7)
+SMOOTHING_WINDOW = getattr(app_config, "SMOOTHING_WINDOW", 5)
 TARGET_FPS = getattr(app_config, "TARGET_FPS", 30)
 TEMPORAL_FILTER_FRAMES = 4
+
+# Stereo depth quality
+FRAME_SIZE = (640, 480)  # RGB size; depth is aligned to the RGB camera
+# Depth is sent at half size: the 5x5 matrix does not need more, and full-size
+# RGB + depth exceeds what a USB 2 connection can carry at 30 FPS.
+DEPTH_SIZE = (320, 240)
+STEREO_SUBPIXEL = getattr(app_config, "STEREO_SUBPIXEL", True)
+STEREO_EXTENDED_DISPARITY = getattr(app_config, "STEREO_EXTENDED_DISPARITY", False)
+
+# 5x5 matrix construction
+RELIEF_SPAN_MM = getattr(app_config, "RELIEF_SPAN_MM", 150)
+HAND_BAND_MM = getattr(app_config, "HAND_BAND_MM", 120)
+MIN_CELL_COVERAGE = getattr(app_config, "MIN_CELL_COVERAGE", 0.15)
+BBOX_SMOOTHING_ALPHA = getattr(app_config, "BBOX_SMOOTHING_ALPHA", 0.5)
+HAND_DEPTH_SMOOTHING_ALPHA = getattr(app_config, "HAND_DEPTH_SMOOTHING_ALPHA", 0.3)
 
 
 # ============================================================================
@@ -121,6 +138,7 @@ class MediaPipeHandDetector:
         self.last_bbox = None
         self.calibrating = False
         self.calibration_samples = []
+        self.bbox_smoother = ExponentialSmoother(BBOX_SMOOTHING_ALPHA)
         
         print(f"Loading MediaPipe Hand Tracking...")
         
@@ -137,7 +155,8 @@ class MediaPipeHandDetector:
             print(f"[ERROR] Failed to load MediaPipe: {e}")
             raise
     
-    def calibrate_depth_range(self, depth_frame, hand_bbox=None, num_samples=30):
+    def calibrate_depth_range(self, depth_frame, hand_bbox=None, num_samples=30,
+                              landmarks_px=None):
         """Auto-calibrate depth range.
 
         If a hand bbox is available, sample calibration from that ROI so the
@@ -149,7 +168,12 @@ class MediaPipeHandDetector:
         depth_data = depth_frame.getFrame()
         h, w = depth_data.shape
 
-        if hand_bbox is not None:
+        # Prefer depth at the landmarks: a bbox median mostly sees whatever is
+        # behind the hand (between the fingers).
+        landmark_depth = estimate_hand_depth(depth_data, landmarks_px) if landmarks_px else None
+        if landmark_depth is not None:
+            roi = np.array([landmark_depth])
+        elif hand_bbox is not None:
             x, y, box_w, box_h = hand_bbox
             x = max(0, min(x, w - 1))
             y = max(0, min(y, h - 1))
@@ -185,108 +209,67 @@ class MediaPipeHandDetector:
         return False
     
     def detect_hand(self, rgb_frame, depth_frame):
-        """Detect hand using MediaPipe on RGB frame, then map to depth.
-        
-        Finds the full hand using 21 3D landmarks to extract a perfect bounding box.
-        
-        Args:
-            rgb_frame: RGB frame from camera (numpy array)
-            depth_frame: Depth frame from camera (DepthAI frame)
-            
+        """Detect hand using MediaPipe on the RGB frame.
+
+        Depth is aligned to the RGB camera at the same resolution, so landmark
+        pixel coordinates index the depth frame directly.
+
         Returns:
-            tuple: (hand_mask, bbox, hand_detected, confidence, status)
+            tuple: (bbox, landmarks_px, hand_detected, confidence, status)
+                bbox is smoothed over frames; landmarks_px is a list of 21
+                (x, y) pixel tuples in depth-frame coordinates.
         """
         h, w = rgb_frame.shape[:2]
-        
-        # Convert BGR (OpenCV) to RGB (MediaPipe)
-        rgb_image = cv2.cvtColor(rgb_frame, cv2.COLOR_BGR2RGB)
-        
-        # Process the image with MediaPipe
-        results = self.hands.process(rgb_image)
-        
-        if results.multi_hand_landmarks:
-            # We only configured for 1 hand, get the first one
-            hand_landmarks = results.multi_hand_landmarks[0]
-            
-            # Find bounding box from landmarks
-            x_min, y_min = w, h
-            x_max, y_max = 0, 0
-            
-            for landmark in hand_landmarks.landmark:
-                px = int(np.clip(landmark.x * w, 0, w - 1))
-                py = int(np.clip(landmark.y * h, 0, h - 1))
-                x_min = min(x_min, px)
-                y_min = min(y_min, py)
-                x_max = max(x_max, px)
-                y_max = max(y_max, py)
-                
-            # Add 10% padding to ensure full hand is enveloped
-            box_w = x_max - x_min
-            box_h = y_max - y_min
-            
-            pad_x = int(box_w * 0.10)
-            pad_y = int(box_h * 0.10)
-            
-            x = max(0, x_min - pad_x)
-            y = max(0, y_min - pad_y)
-            w_box = min(w - x, box_w + 2 * pad_x)
-            h_box = min(h - y, box_h + 2 * pad_y)
-            
-            # Reject very small boxes
-            if w_box * h_box < MIN_HAND_AREA:
-                self.detection_history.append(False)
-                depth_data = depth_frame.getFrame()
-                empty_mask = np.zeros((depth_data.shape[0], depth_data.shape[1]), dtype=np.uint8)
-                return empty_mask, None, False, 0.0, "no_detection"
-                
-            confidence = 1.0 # MediaPipe abstracts raw conf info, but if it triggers it's high confidence
-            bbox = (x, y, w_box, h_box)
-            
-            # Create hand mask from depth data in detected region
-            depth_data = depth_frame.getFrame()
-            hand_mask = np.zeros((depth_data.shape[0], depth_data.shape[1]), dtype=np.uint8)
-            
-            # Map RGB bbox to depth frame (assuming same resolution)
-            depth_frame_h, depth_frame_w = depth_data.shape
-            scale_x = depth_frame_w / w
-            scale_y = depth_frame_h / h
-            
-            depth_x = int(x * scale_x)
-            depth_y = int(y * scale_y)
-            depth_bbox_w = int(w_box * scale_x)
-            depth_bbox_h = int(h_box * scale_y)
-            
-            # Clamp to depth frame bounds
-            depth_x = max(0, min(depth_x, depth_frame_w - 1))
-            depth_y = max(0, min(depth_y, depth_frame_h - 1))
-            depth_bbox_w = min(depth_bbox_w, depth_frame_w - depth_x)
-            depth_bbox_h = min(depth_bbox_h, depth_frame_h - depth_y)
-            
-            # Create mask for hand region within depth range
-            if depth_bbox_w > 0 and depth_bbox_h > 0:
-                hand_region = depth_data[depth_y:depth_y+depth_bbox_h, depth_x:depth_x+depth_bbox_w]
-                mask_region = ((hand_region >= HAND_DEPTH_MIN) & 
-                              (hand_region <= HAND_DEPTH_MAX)).astype(np.uint8) * 255
-                hand_mask[depth_y:depth_y+depth_bbox_h, depth_x:depth_x+depth_bbox_w] = mask_region
-                
-            # Temporal filtering
-            self.detection_history.append(True)
-            detection_count = sum(self.detection_history)
-            temporal_confidence = detection_count / len(self.detection_history)
-            
-            hand_detected = temporal_confidence >= 0.75
-            
-            if hand_detected:
-                self.last_bbox = bbox
-            
-            return hand_mask, bbox, hand_detected, confidence, "detected"
-            
-        # No hand detected
+        depth_h, depth_w = depth_frame.getHeight(), depth_frame.getWidth()
+        scale_x, scale_y = depth_w / w, depth_h / h
+
+        results = self.hands.process(cv2.cvtColor(rgb_frame, cv2.COLOR_BGR2RGB))
+
+        if not results.multi_hand_landmarks:
+            return self._no_hand()
+
+        landmarks_px = []
+        for lm in results.multi_hand_landmarks[0].landmark:
+            px = int(np.clip(lm.x * w, 0, w - 1) * scale_x)
+            py = int(np.clip(lm.y * h, 0, h - 1) * scale_y)
+            landmarks_px.append((px, py))
+
+        xs = [p[0] for p in landmarks_px]
+        ys = [p[1] for p in landmarks_px]
+        x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
+
+        # Add 10% padding to ensure full hand is enveloped
+        pad_x = int((x_max - x_min) * 0.10)
+        pad_y = int((y_max - y_min) * 0.10)
+        raw_bbox = (
+            max(0, x_min - pad_x),
+            max(0, y_min - pad_y),
+            min(depth_w - 1, x_max + pad_x),
+            min(depth_h - 1, y_max + pad_y),
+        )
+
+        # MIN_HAND_AREA is in RGB pixels; the box is in depth pixels.
+        rgb_area = (raw_bbox[2] - raw_bbox[0]) * (raw_bbox[3] - raw_bbox[1]) / (scale_x * scale_y)
+        if rgb_area < MIN_HAND_AREA:
+            return self._no_hand()
+
+        # Smooth the box corners so the 5x5 grid does not jump every frame.
+        x0, y0, x1, y1 = (int(round(v)) for v in self.bbox_smoother.update(raw_bbox))
+        bbox = (x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+
+        self.detection_history.append(True)
+        temporal_confidence = sum(self.detection_history) / len(self.detection_history)
+        hand_detected = temporal_confidence >= 0.75
+        if hand_detected:
+            self.last_bbox = bbox
+
+        # MediaPipe does not expose a per-frame score here; a detection is trusted.
+        return bbox, landmarks_px, hand_detected, 1.0, "detected"
+
+    def _no_hand(self):
         self.detection_history.append(False)
-        depth_data = depth_frame.getFrame()
-        empty_mask = np.zeros((depth_data.shape[0], depth_data.shape[1]), dtype=np.uint8)
-        
-        return empty_mask, None, False, 0.0, "no_detection"
+        self.bbox_smoother.reset()
+        return None, None, False, 0.0, "no_detection"
 
     def close(self):
         """Release MediaPipe resources."""
@@ -301,49 +284,12 @@ class MediaPipeHandDetector:
 # Depth Processing
 # ============================================================================
 
-def crop_depth_to_hand(depth_frame, hand_bbox):
-    """Crop and process depth to hand region."""
-    if hand_bbox is None:
-        return process_depth_frame(depth_frame)
-    
-    x, y, w, h = hand_bbox
-    depth_data = depth_frame.getFrame()
-    frame_h, frame_w = depth_data.shape
-
-    x = max(0, min(x, frame_w - 1))
-    y = max(0, min(y, frame_h - 1))
-    w = max(1, min(w, frame_w - x))
-    h = max(1, min(h, frame_h - y))
-
-    hand_region = depth_data[y:y+h, x:x+w]
-    if hand_region.size == 0:
-        return process_depth_frame(depth_frame)
-    
-    valid_mask = (hand_region >= HAND_DEPTH_MIN) & (hand_region <= HAND_DEPTH_MAX)
-    
-    if not np.any(valid_mask):
-        return process_depth_frame(depth_frame)
-    
-    hand_clipped = np.clip(hand_region, HAND_DEPTH_MIN, HAND_DEPTH_MAX)
-    
-    # Adaptive normalization
-    hand_valid = hand_clipped[valid_mask]
-    actual_min = np.percentile(hand_valid, 5)
-    actual_max = np.percentile(hand_valid, 95)
-    
-    if actual_max > actual_min:
-        hand_normalized = np.clip(
-            (hand_clipped - actual_min) / (actual_max - actual_min) * 255,
-            0, 255
-        ).astype(np.uint8)
-    else:
-        depth_range = max(1, HAND_DEPTH_MAX - HAND_DEPTH_MIN)
-        hand_normalized = ((hand_clipped - HAND_DEPTH_MIN) / depth_range * 255).astype(np.uint8)
-    
-    hand_5x5 = cv2.resize(hand_normalized, (5, 5), interpolation=cv2.INTER_AREA)
-    
-    return hand_5x5
-
+def compute_hand_matrix(depth_data, bbox, landmarks_px, hand_depth):
+    """Build the 5x5 matrix from hand pixels only. Returns (matrix_5x5, hand_mask)."""
+    return hand_matrix_lib.compute_hand_matrix(
+        depth_data, bbox, landmarks_px, hand_depth,
+        HAND_BAND_MM, RELIEF_SPAN_MM, MIN_CELL_COVERAGE,
+    )
 
 
 # ============================================================================
@@ -402,8 +348,10 @@ def create_rgb_window(rgb_frame, hand_bbox, hand_detected, confidence, frame_cou
     h, w = display.shape[:2]
     
     if hand_detected and hand_bbox:
-        x, y, w_box, h_box = hand_bbox
-        
+        sx, sy = w / DEPTH_SIZE[0], h / DEPTH_SIZE[1]  # bbox is in depth pixels
+        x, y, w_box, h_box = (int(hand_bbox[0] * sx), int(hand_bbox[1] * sy),
+                              int(hand_bbox[2] * sx), int(hand_bbox[3] * sy))
+
         if confidence > 0.9:
             color = (0, 255, 0)
         elif confidence > 0.75:
@@ -433,21 +381,32 @@ def create_rgb_window(rgb_frame, hand_bbox, hand_detected, confidence, frame_cou
 # Window 2: Depth Map
 # ============================================================================
 
-def create_depth_window(depth_frame):
+def colorize_depth(depth_mm, near_mm, far_mm):
+    """Colorize depth so near = red, far = blue, no-depth = black."""
+    d = depth_mm.astype(np.float32)
+    scaled = np.clip((far_mm - d) / max(1.0, far_mm - near_mm), 0, 1)
+    colored = cv2.applyColorMap((scaled * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+    colored[depth_mm == 0] = 0
+    return colored
+
+
+def create_depth_window(depth_frame, hand_bbox=None):
     """Window 2: Colorized depth map."""
     depth_data = depth_frame.getFrame()
-    
-    depth_clipped = np.clip(depth_data, 0, 5000).astype(np.float32)
-    depth_normalized = (depth_clipped / 5000.0 * 255.0).astype(np.uint8)
-    
-    depth_colorized = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_TURBO)
-    
-    h, w = depth_colorized.shape[:2]
+    depth_colorized = colorize_depth(depth_data, 200, 2000)
+    scale = FRAME_SIZE[0] / depth_colorized.shape[1]
+    depth_colorized = cv2.resize(depth_colorized, FRAME_SIZE, interpolation=cv2.INTER_NEAREST)
+
+    if hand_bbox is not None:
+        x, y, bw, bh = (int(v * scale) for v in hand_bbox)
+        cv2.rectangle(depth_colorized, (x, y), (x + bw, y + bh), (255, 255, 255), 2)
+
+    h = depth_colorized.shape[0]
     cv2.putText(depth_colorized, "DEPTH MAP", (20, 40),
                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    cv2.putText(depth_colorized, "Blue=Far | Red=Near", (20, h - 20),
+    cv2.putText(depth_colorized, "Red=Near  Blue=Far  Black=No depth", (20, h - 20),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    
+
     return depth_colorized
 
 
@@ -455,88 +414,49 @@ def create_depth_window(depth_frame):
 # Window 3: Hand Region Zoom
 # ============================================================================
 
-def create_hand_zoom_window(depth_frame, hand_bbox, hand_detected, calibrating=False):
-    """Window 3: Zoomed view of hand region."""
-    if (not hand_detected or hand_bbox is None) and not calibrating:
+def create_hand_zoom_window(depth_frame, hand_bbox, hand_mask, hand_depth,
+                            status_text, calibrating=False):
+    """Window 3: The hand pixels used for the matrix, with the 5x5 grid drawn."""
+    if hand_bbox is None or hand_mask is None or hand_depth is None:
         placeholder = np.zeros((400, 400, 3), dtype=np.uint8)
-        cv2.putText(placeholder, "NO HAND", (100, 200),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, (100, 100, 100), 3)
-        cv2.putText(placeholder, "Wave your hand", (80, 250),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 100), 2)
-        cv2.putText(placeholder, "in front of camera", (60, 290),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 100), 2)
+        cv2.putText(placeholder, status_text, (30, 200),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (100, 100, 100), 2)
+        if calibrating:
+            cv2.putText(placeholder, "CALIBRATING", (20, 75),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
         return placeholder
-    
+
     depth_data = depth_frame.getFrame()
+    x, y, bw, bh = hand_bbox
+    region = depth_data[y:y + bh, x:x + bw]
+    region_mask = hand_mask[y:y + bh, x:x + bw]
 
-    if hand_bbox is not None:
-        x, y, w, h = hand_bbox
-    else:
-        frame_h, frame_w = depth_data.shape
-        roi_size = 100
-        center_x = frame_w // 2
-        center_y = int(frame_h * 0.7)
-        x = max(0, center_x - roi_size)
-        y = max(0, center_y - roi_size)
-        w = min(frame_w - x, 2 * roi_size)
-        h = min(frame_h - y, 2 * roi_size)
+    half_span = RELIEF_SPAN_MM / 2.0
+    colored = colorize_depth(region, hand_depth - half_span, hand_depth + half_span)
+    colored[~region_mask] = 0
 
-    hand_region = depth_data[y:y + h, x:x + w]
-    if hand_region.size == 0:
-        placeholder = np.zeros((400, 400, 3), dtype=np.uint8)
-        cv2.putText(placeholder, "EMPTY ROI", (95, 220),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 2)
-        return placeholder
+    zoomed = cv2.resize(colored, (400, 400), interpolation=cv2.INTER_NEAREST)
+    for k in range(1, 5):
+        cv2.line(zoomed, (k * 80, 0), (k * 80, 400), (90, 90, 90), 1)
+        cv2.line(zoomed, (0, k * 80), (400, k * 80), (90, 90, 90), 1)
 
-    valid_depths = hand_region[(hand_region >= HAND_DEPTH_MIN) & (hand_region <= HAND_DEPTH_MAX)]
-    if valid_depths.size:
-        hand_clipped = np.clip(hand_region, HAND_DEPTH_MIN, HAND_DEPTH_MAX).astype(np.float32)
-        depth_range = max(1, HAND_DEPTH_MAX - HAND_DEPTH_MIN)
-        hand_normalized = ((hand_clipped - HAND_DEPTH_MIN) / depth_range * 255.0).astype(np.uint8)
-        depth_label = f"Avg: {float(np.mean(valid_depths)):.0f}mm"
-        depth_label_color = (255, 255, 255)
-    else:
-        nonzero_depths = hand_region[hand_region > 0]
-        if nonzero_depths.size:
-            lo = float(np.percentile(nonzero_depths, 5))
-            hi = float(np.percentile(nonzero_depths, 95))
-            if hi <= lo:
-                hi = lo + 1.0
-            hand_normalized = np.clip(
-                (hand_region.astype(np.float32) - lo) / (hi - lo) * 255.0,
-                0, 255
-            ).astype(np.uint8)
-            depth_label = f"Out of range ({HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm)"
-            depth_label_color = (0, 255, 255)
-        else:
-            hand_normalized = np.zeros(hand_region.shape, dtype=np.uint8)
-            depth_label = "No valid depth pixels"
-            depth_label_color = (0, 0, 255)
-    
-    hand_colorized = cv2.applyColorMap(hand_normalized, cv2.COLORMAP_JET)
-    
-    hand_zoomed = cv2.resize(hand_colorized, (400, 400), interpolation=cv2.INTER_LINEAR)
-    
-    cv2.putText(hand_zoomed, "HAND REGION", (20, 40),
+    cv2.putText(zoomed, "HAND PIXELS", (20, 40),
                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
     if calibrating:
-        cv2.putText(hand_zoomed, "CALIBRATING", (20, 75),
+        cv2.putText(zoomed, "CALIBRATING", (20, 75),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    cv2.putText(zoomed, f"Hand at {hand_depth:.0f}mm", (20, 380),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
-    cv2.putText(hand_zoomed, depth_label, (20, 380),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.65, depth_label_color, 2)
-    
-    return hand_zoomed
-
-
+    return zoomed
 
 # ============================================================================
 # Window 4: 5x5 Matrix Display (Sprint 2 Enhanced)
 # ============================================================================
 
-def create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, udp_sender, 
-                                 detector, profiler, calibration_mgr, renderer):
+def create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, udp_sender,
+                                 detector, profiler, calibration_mgr, renderer,
+                                 status_text=""):
     """Window 4: Enhanced matrix with performance stats and calibration info."""
     window_size = 600
     display = np.zeros((window_size, window_size, 3), dtype=np.uint8)
@@ -545,7 +465,9 @@ def create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, udp_sender,
     # Title
     cv2.putText(display, "5x5 DEPTH MATRIX", (150, 50),
                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-    
+    cv2.putText(display, status_text, (50, 85),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
     # Draw grid
     cell_size = 100
     start_x = 50
@@ -558,12 +480,15 @@ def create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, udp_sender,
             
             value = int(depth_5x5_smoothed[i, j])
             
-            intensity = value / 255.0
-            cell_color = (
-                int(50 + 100 * (1 - intensity)),
-                int(50 + 150 * intensity),
-                int(50 + 100 * intensity)
-            )
+            if value == 0:
+                cell_color = (45, 45, 45)  # no hand in this cell
+            else:
+                intensity = value / 255.0  # higher = closer
+                cell_color = (
+                    int(50 + 100 * (1 - intensity)),
+                    int(50 + 150 * intensity),
+                    int(50 + 100 * intensity)
+                )
             
             cv2.rectangle(display, (x, y), (x + cell_size, y + cell_size), cell_color, -1)
             cv2.rectangle(display, (x, y), (x + cell_size, y + cell_size), (200, 200, 200), 2)
@@ -630,28 +555,67 @@ def create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, udp_sender,
 # Pipeline Creation
 # ============================================================================
 
+def configure_stereo(stereo):
+    """Shared StereoDepth settings for accurate close-range hand depth."""
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
+    stereo.setLeftRightCheck(True)
+    # Subpixel gives ~8x finer depth steps; without it a hand at 1 m is only
+    # resolved in ~35 mm steps, which is coarser than the hand's own relief.
+    stereo.setSubpixel(STEREO_SUBPIXEL)
+    # Extended disparity lets the hand come closer than ~35 cm (costs FPS).
+    stereo.setExtendedDisparity(STEREO_EXTENDED_DISPARITY)
+    # Align depth to the RGB camera so MediaPipe pixel coordinates line up.
+    stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+    stereo.setOutputSize(*DEPTH_SIZE)
+
+    if STEREO_SUBPIXEL:
+        # 3 fractional bits keeps max disparity under the median filter's
+        # limit (the preset's 5 bits silently disables the median filter).
+        stereo.setSubpixelFractionalBits(3)
+    cfg = stereo.initialConfig
+    cfg.setMedianFilter(dai.StereoDepthConfig.MedianFilter.KERNEL_5x5)
+    # Speckle/spatial/temporal post-filters are left off: on the OAK-D Lite
+    # they dropped the pipeline to 3-9 FPS. Smoothing is done on the host.
+    pp = cfg.postProcessing
+    pp.speckleFilter.enable = False
+    pp.spatialFilter.enable = False
+    pp.temporalFilter.enable = False
+    pp.thresholdFilter.minRange = 150
+    pp.thresholdFilter.maxRange = 2500
+
+
+class FrameSource:
+    """Returns time-matched (rgb_frame, depth_frame) pairs."""
+
+    def __init__(self, get_pair):
+        self._get_pair = get_pair
+
+    def get(self):
+        return self._get_pair()
+
+
 def create_pipeline():
-    """Create DepthAI pipeline."""
+    """Create DepthAI pipeline. Returns (pipeline, frame_source or None)."""
     pipeline = dai.Pipeline()
+    width, height = FRAME_SIZE
 
     if hasattr(dai.node, "XLinkOut"):
+        # depthai v2 API
         cam_rgb = pipeline.create(dai.node.ColorCamera)
-        cam_rgb.setPreviewSize(640, 400)
+        cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        cam_rgb.setPreviewSize(width, height)
         cam_rgb.setInterleaved(False)
         cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
 
         mono_left = pipeline.create(dai.node.MonoCamera)
         mono_right = pipeline.create(dai.node.MonoCamera)
-        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
         mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
         mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
 
         stereo = pipeline.create(dai.node.StereoDepth)
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
-        stereo.setLeftRightCheck(True)
-        stereo.setExtendedDisparity(False)
-        stereo.setSubpixel(False)
+        configure_stereo(stereo)
         mono_left.out.link(stereo.left)
         mono_right.out.link(stereo.right)
 
@@ -661,31 +625,33 @@ def create_pipeline():
         xout_depth = pipeline.create(dai.node.XLinkOut)
         xout_depth.setStreamName("depth")
         stereo.depth.link(xout_depth.input)
-        return pipeline, None, None
+        return pipeline, None
 
+    # depthai v3 API
     cam_rgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-    rgb_output = cam_rgb.requestOutput((640, 400), fps=TARGET_FPS)
+    rgb_output = cam_rgb.requestOutput(FRAME_SIZE, fps=TARGET_FPS)
     mono_left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
     mono_right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
-    left_output = mono_left.requestOutput(
-        (640, 400), type=dai.ImgFrame.Type.GRAY8, fps=TARGET_FPS
-    )
-    right_output = mono_right.requestOutput(
-        (640, 400), type=dai.ImgFrame.Type.GRAY8, fps=TARGET_FPS
-    )
+    left_output = mono_left.requestOutput(FRAME_SIZE, type=dai.ImgFrame.Type.GRAY8, fps=TARGET_FPS)
+    right_output = mono_right.requestOutput(FRAME_SIZE, type=dai.ImgFrame.Type.GRAY8, fps=TARGET_FPS)
 
     stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.ACCURACY)
-    stereo.setLeftRightCheck(True)
-    stereo.setExtendedDisparity(False)
-    stereo.setSubpixel(False)
+    configure_stereo(stereo)
     left_output.link(stereo.left)
     right_output.link(stereo.right)
 
-    rgb_queue = rgb_output.createOutputQueue(maxSize=4, blocking=False)
-    depth_queue = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
-    return pipeline, rgb_queue, depth_queue
+    # Pair RGB and depth by timestamp so the hand box matches the depth frame.
+    sync = pipeline.create(dai.node.Sync)
+    sync.setSyncThreshold(timedelta(milliseconds=int(500 / TARGET_FPS)))
+    rgb_output.link(sync.inputs["rgb"])
+    stereo.depth.link(sync.inputs["depth"])
+    sync_queue = sync.out.createOutputQueue(maxSize=4, blocking=False)
 
+    def get_pair():
+        group = sync_queue.get()
+        return group["rgb"], group["depth"]
+
+    return pipeline, FrameSource(get_pair)
 
 
 # ============================================================================
@@ -726,11 +692,12 @@ def main():
             print(f"[OK] Loaded saved calibration: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
         
         # Create pipeline and device
-        pipeline, rgb_queue, depth_queue = create_pipeline()
+        pipeline, frames = create_pipeline()
         if hasattr(dai.Device, "getOutputQueue"):
             device = dai.Device(pipeline)
             rgb_queue = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
             depth_queue = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+            frames = FrameSource(lambda: (rgb_queue.get(), depth_queue.get()))
         else:
             pipeline.start()
         
@@ -739,6 +706,10 @@ def main():
         # Initialize components
         udp_sender = UDPSender(PICO_IP, PICO_PORT)
         smoother = RollingAverageFilter(window_size=SMOOTHING_WINDOW)
+        hand_depth_smoother = ExponentialSmoother(HAND_DEPTH_SMOOTHING_ALPHA)
+        empty_matrix = np.zeros((5, 5), dtype=np.uint8)
+        sent_release = True  # an all-zero packet has been sent since the hand was lost
+        last_status_kind = None
         detector = MediaPipeHandDetector(
             confidence_threshold=0.5
         )
@@ -772,8 +743,7 @@ def main():
             
             # Frame acquisition
             profiler.start_stage("frame_acquisition")
-            rgb_frame_data = rgb_queue.get()
-            depth_frame_data = depth_queue.get()
+            rgb_frame_data, depth_frame_data = frames.get()
             profiler.end_stage("frame_acquisition")
             
             if rgb_frame_data is None or depth_frame_data is None:
@@ -786,50 +756,92 @@ def main():
             
             # Hand detection
             profiler.start_stage("hand_detection")
-            hand_mask, hand_bbox, hand_detected, confidence, status = detector.detect_hand(rgb_frame, depth_frame_data)
+            hand_bbox, landmarks_px, hand_detected, confidence, status = detector.detect_hand(rgb_frame, depth_frame_data)
             profiler.end_stage("hand_detection")
 
             # Handle auto-calibration after detection so we can sample hand ROI.
             if detector.calibrating:
                 calibration_done = detector.calibrate_depth_range(
                     depth_frame_data,
-                    hand_bbox=hand_bbox
+                    hand_bbox=hand_bbox,
+                    landmarks_px=landmarks_px
                 )
                 if calibration_done:
                     calibration_mgr.depth_min = HAND_DEPTH_MIN
                     calibration_mgr.depth_max = HAND_DEPTH_MAX
                     calibration_mgr.last_adjustment_time = time.time()
+                    smoother.reset()
             
-            # Process depth
+            # Process depth: only pixels that belong to the hand are used.
             profiler.start_stage("depth_processing")
-            if hand_detected:
-                depth_5x5_raw = crop_depth_to_hand(depth_frame_data, hand_bbox)
+            depth_data = depth_frame_data.getFrame()
+            hand_mask = None
+            hand_depth = None
+            hand_valid = False
+            if not hand_detected:
+                status_text = "NO HAND - show your hand to the camera"
             else:
-                depth_5x5_raw = process_depth_frame(depth_frame_data)
+                raw_hand_depth = estimate_hand_depth(depth_data, landmarks_px)
+                if raw_hand_depth is None:
+                    status_text = "NO DEPTH ON HAND - too close or poorly lit?"
+                elif not (HAND_DEPTH_MIN <= raw_hand_depth <= HAND_DEPTH_MAX):
+                    status_text = (f"HAND AT {raw_hand_depth:.0f}mm - outside "
+                                   f"{HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm, press 'c'")
+                else:
+                    hand_depth = float(hand_depth_smoother.update(raw_hand_depth))
+                    depth_5x5_raw, hand_mask = compute_hand_matrix(
+                        depth_data, hand_bbox, landmarks_px, hand_depth
+                    )
+                    hand_valid = True
+                    status_text = f"HAND AT {hand_depth:.0f}mm"
             profiler.end_stage("depth_processing")
-            
-            # Apply smoothing
-            depth_5x5_smoothed = smoother.update(depth_5x5_raw)
-            
-            # Send via UDP
+
+            # Report why the matrix is empty (status category only, not every mm).
+            if hand_valid:
+                status_kind = "ok"
+            elif "outside" in status_text:
+                status_kind = "out_of_range"
+            else:
+                status_kind = status_text.split(" - ")[0]
+            if status_kind != last_status_kind:
+                print(f"[status] {status_text}")
+                last_status_kind = status_kind
+
+            # Smooth only real hand frames; start fresh whenever the hand is lost.
+            if hand_valid:
+                depth_5x5_smoothed = smoother.update(depth_5x5_raw)
+            else:
+                smoother.reset()
+                hand_depth_smoother.reset()
+                depth_5x5_raw = depth_5x5_smoothed = empty_matrix
+
+            # Send via UDP (one all-zero packet when the hand is lost, so the
+            # actuators release instead of holding the last shape).
             profiler.start_stage("udp_transmission")
-            if hand_detected and confidence > 0.8 and udp_sender.enabled:
-                udp_sender.send_depth_array(depth_5x5_smoothed)
+            if udp_sender.enabled:
+                if hand_valid:
+                    udp_sender.send_depth_array(depth_5x5_smoothed)
+                    sent_release = False
+                elif not sent_release:
+                    sent_release = udp_sender.send_depth_array(empty_matrix)
             profiler.end_stage("udp_transmission")
             
             # Rendering
             profiler.start_stage("rendering")
             window1 = create_rgb_window(rgb_frame, hand_bbox, hand_detected, confidence, frame_count)
-            window2 = create_depth_window(depth_frame_data)
+            window2 = create_depth_window(depth_frame_data, hand_bbox if hand_detected else None)
             window3 = create_hand_zoom_window(
                 depth_frame_data,
                 hand_bbox,
-                hand_detected,
+                hand_mask,
+                hand_depth,
+                status_text,
                 calibrating=detector.calibrating
             )
-            window4 = create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed, 
-                                                   udp_sender, detector, profiler, 
-                                                   calibration_mgr, renderer)
+            window4 = create_matrix_window_sprint2(depth_5x5_raw, depth_5x5_smoothed,
+                                                   udp_sender, detector, profiler,
+                                                   calibration_mgr, renderer,
+                                                   status_text=status_text)
             profiler.end_stage("rendering")
             
             # Display all windows
@@ -852,19 +864,24 @@ def main():
                 detector.calibration_samples = []
             elif key == ord('r'):
                 HAND_DEPTH_MIN, HAND_DEPTH_MAX = calibration_mgr.reset_to_defaults()
+                smoother.reset()
                 print(f"\nReset to defaults: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
             # Sprint 2: Calibration controls
             elif key == ord('+') or key == ord('='):
                 HAND_DEPTH_MIN, HAND_DEPTH_MAX = calibration_mgr.increase_max()
+                smoother.reset()
                 print(f"Max depth increased: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
             elif key == ord('-') or key == ord('_'):
                 HAND_DEPTH_MIN, HAND_DEPTH_MAX = calibration_mgr.decrease_max()
+                smoother.reset()
                 print(f"Max depth decreased: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
             elif key == ord('['):
                 HAND_DEPTH_MIN, HAND_DEPTH_MAX = calibration_mgr.decrease_min()
+                smoother.reset()
                 print(f"Min depth decreased: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
             elif key == ord(']'):
                 HAND_DEPTH_MIN, HAND_DEPTH_MAX = calibration_mgr.increase_min()
+                smoother.reset()
                 print(f"Min depth increased: {HAND_DEPTH_MIN}-{HAND_DEPTH_MAX}mm")
             elif key == ord('p'):
                 print("\nSaving calibration to config...")

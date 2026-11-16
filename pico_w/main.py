@@ -11,6 +11,7 @@ import network
 import socket
 import struct
 import time
+from machine import UART, Pin
 
 
 # WIFI_SSID = "Starforge Guest"
@@ -19,12 +20,14 @@ WIFI_PASSWORD = "TFL_Student609"
 
 UDP_PORT = 5000
 PACKET_HEADER = b"DPTH"
-EXPECTED_PACKET_SIZE = 37
+EXPECTED_PACKET_SIZE = 21
 SOCKET_TIMEOUT_SECONDS = 1.0
 STATUS_PRINT_EVERY = 10
 
 
 led = machine.Pin("LED", machine.Pin.OUT)
+
+uart = UART(1, baudrate=9600, tx=Pin(0), rx=Pin(1))
 
 
 def blink(count, on_ms=120, off_ms=120):
@@ -68,10 +71,10 @@ def parse_depth_packet(packet):
         raise ValueError("Bad packet header: {}".format(packet[:4]))
 
     packet_id, timestamp = struct.unpack("<If", packet[4:12])
-    matrix_bytes = packet[12:37]
+    matrix_bytes = packet[12:21]
     matrix = []
-    for row_start in range(0, 25, 5):
-        matrix.append(list(matrix_bytes[row_start:row_start + 5]))
+    for row_start in range(0, 9, 3):
+        matrix.append(list(matrix_bytes[row_start:row_start + 3]))
 
     return packet_id, timestamp, matrix
 
@@ -79,7 +82,7 @@ def parse_depth_packet(packet):
 def print_matrix(matrix):
     print("-" * 29)
     for row in matrix:
-        print("[{:3d} {:3d} {:3d} {:3d} {:3d}]".format(*row))
+        print("[{:3d} {:3d} {:3d}]".format(*row))
     print("-" * 29)
 
 
@@ -128,6 +131,10 @@ def run():
 
         if packet_count == 1 or packet_count % STATUS_PRINT_EVERY == 0:
             print_matrix(matrix)
+            flat_array = [item for row in matrix for item in row]
+            header = b"DPTH"
+            packet = struct.pack("<4s9i", header , *flat_array)
+            uart.write(packet)
             print("Free mem:", gc.mem_free())
 
 
